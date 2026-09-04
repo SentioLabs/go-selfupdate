@@ -144,13 +144,13 @@ func (u *Updater) Update(ctx context.Context, opts UpdateOptions) error {
 		fmt.Fprintln(w, "Update cancelled.")
 		return nil
 	}
+	if u.Installer == nil {
+		return ErrNoInstaller
+	}
 	if u.PreInstall != nil {
 		if err := u.PreInstall(ctx, res.Current, res.Latest); err != nil {
 			return fmt.Errorf("pre-install step failed: %w", err)
 		}
-	}
-	if u.Installer == nil {
-		return ErrNoInstaller
 	}
 	return u.Installer.Install(ctx, res.Latest)
 }

@@ -241,6 +241,25 @@ func TestUpdater_UpdateForceReinstallsWhenUpToDate(t *testing.T) {
 	}
 }
 
+func TestUpdater_UpdateNoInstallerSkipsPreInstall(t *testing.T) {
+	src := &fakeSource{latest: Release{Tag: tagV200}}
+	var called bool
+	u := &Updater{
+		Name: testRepo, Version: tagV100, Source: src, Out: &bytes.Buffer{},
+		PreInstall: func(context.Context, string, string) error {
+			called = true
+			return nil
+		},
+	}
+	err := u.Update(context.Background(), UpdateOptions{Yes: true})
+	if !errors.Is(err, ErrNoInstaller) {
+		t.Fatalf("got %v", err)
+	}
+	if called {
+		t.Fatal("PreInstall must not run when Installer is nil")
+	}
+}
+
 func TestUpdater_UpdateRCChannelUsesResolve(t *testing.T) {
 	src := &fakeSource{list: fixtureReleases(), latest: Release{Tag: tagV0100}}
 	u, out, _, _ := newTestUpdater(tagV0100, src, &MemStore{Current: ChannelRC}, "")
