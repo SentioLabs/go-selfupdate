@@ -7,8 +7,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // requireCurlAndBash skips the test when either tool is missing from PATH.
@@ -73,6 +75,71 @@ func TestScriptInstaller_CurlFailureIsError(t *testing.T) {
 	s := &ScriptInstaller{ScriptURL: "file://" + missing, Stdout: &out, Stderr: &out}
 	if err := s.Install(context.Background(), "v1.0.0"); err == nil {
 		t.Fatalf("expected error when curl fails, got nil, output: %s", out.String())
+	}
+}
+
+func TestScriptInstaller_CancelStopsPipeline(t *testing.T) {
+	requireCurlAndBash(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("process groups are not used on windows")
+	}
+	dir := t.TempDir()
+	script := filepath.Join(dir, "install.sh")
+	body := "#!/usr/bin/env bash\nsleep 31.415\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil { //nolint:gosec // script must be executable
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	// A non-file Stdin keeps this on the detached-process-group path
+	// regardless of what the test runner's own stdin happens to be.
+	s := &ScriptInstaller{ScriptURL: "file://" + script, Stdout: &out, Stderr: &out, Stdin: strings.NewReader("")}
+	ctx, cancel := context.WithCancel(context.Background())
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- s.Install(ctx, "v1.0.0")
+	}()
+
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("expected an error from a cancelled install")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Install did not return within 3 seconds of cancellation")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		findErr := exec.Command("pgrep", "-f", "sleep 31.415").Run()
+		if findErr != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("sleep 31.415 is still running after cancellation")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func TestStdinIsTerminal(t *testing.T) {
+	if stdinIsTerminal(nil) {
+		t.Error("nil reader must not be a terminal")
+	}
+	if stdinIsTerminal(strings.NewReader("input")) {
+		t.Error("a strings.Reader must not be a terminal")
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+	defer func() { _ = w.Close() }()
+	if stdinIsTerminal(r) {
+		t.Error("the read end of an os.Pipe must not be a terminal")
 	}
 }
 
