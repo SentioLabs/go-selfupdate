@@ -65,6 +65,17 @@ func TestScriptInstaller_RunsScriptViaFileURL(t *testing.T) {
 	}
 }
 
+func TestScriptInstaller_CurlFailureIsError(t *testing.T) {
+	requireCurlAndBash(t)
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "does-not-exist.sh")
+	var out bytes.Buffer
+	s := &ScriptInstaller{ScriptURL: "file://" + missing, Stdout: &out, Stderr: &out}
+	if err := s.Install(context.Background(), "v1.0.0"); err == nil {
+		t.Fatalf("expected error when curl fails, got nil, output: %s", out.String())
+	}
+}
+
 func TestScriptInstaller_NonZeroExitIsError(t *testing.T) {
 	requireCurlAndBash(t)
 	dir := t.TempDir()

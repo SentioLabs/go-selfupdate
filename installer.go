@@ -39,13 +39,14 @@ func (s *ScriptInstaller) command(tag string) (string, error) {
 	return "curl -fsSL " + s.ScriptURL + " | bash -s -- --force --tag=" + tag, nil
 }
 
-// Install runs the install script for tag.
+// Install runs the install script for tag. It runs under pipefail so a
+// curl failure fails the pipeline instead of exiting 0 on empty stdin.
 func (s *ScriptInstaller) Install(ctx context.Context, tag string) error {
 	line, err := s.command(tag)
 	if err != nil {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, "bash", "-c", line)
+	cmd := exec.CommandContext(ctx, "bash", "-o", "pipefail", "-c", line)
 	cmd.Stdout = s.Stdout
 	if cmd.Stdout == nil {
 		cmd.Stdout = os.Stdout
