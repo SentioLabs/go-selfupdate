@@ -8,6 +8,7 @@ package selfupdate
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -19,19 +20,42 @@ const (
 	tagV0100    = "v0.10.0"
 )
 
+// tagV0200RC101, tagV0190 and tagV0210 back the overflow-page fixture below.
+const (
+	tagV0200RC101 = "v0.20.0-rc.101"
+	tagV0190      = "v0.19.0"
+	tagV0210      = "v0.21.0"
+)
+
 // fakeSource serves canned releases. latestErr and listErr force failures.
 type fakeSource struct {
-	latest    Release
-	list      []Release
-	latestErr error
-	listErr   error
-	listCalls int
+	latest      Release
+	list        []Release
+	latestErr   error
+	listErr     error
+	listCalls   int
+	latestCalls int
 }
 
-func (f *fakeSource) Latest(context.Context) (Release, error) { return f.latest, f.latestErr }
+func (f *fakeSource) Latest(context.Context) (Release, error) {
+	f.latestCalls++
+	return f.latest, f.latestErr
+}
+
 func (f *fakeSource) List(context.Context, int) ([]Release, error) {
 	f.listCalls++
 	return f.list, f.listErr
+}
+
+// manyRCReleases returns 101 rc prereleases, newest first, from
+// v0.20.0-rc.101 down to v0.20.0-rc.1. That's one more than maxPerPage, so a
+// single List page can't also contain a stable release.
+func manyRCReleases() []Release {
+	releases := make([]Release, 101)
+	for i := range releases {
+		releases[i] = Release{Tag: fmt.Sprintf("v0.20.0-rc.%d", 101-i), Prerelease: true}
+	}
+	return releases
 }
 
 // fixtureReleases mirrors arc's fixture: undotted and dotted rc tags,
@@ -138,5 +162,49 @@ func TestResolve_SourceErrorsPropagate(t *testing.T) {
 	}
 	if _, err := Resolve(context.Background(), &fakeSource{listErr: boom}, ChannelRC, nil); !errors.Is(err, boom) {
 		t.Fatalf("rc: %v", err)
+	}
+}
+
+func TestResolve_OverflowPageFallsBackToLatest(t *testing.T) {
+	src := &fakeSource{list: manyRCReleases(), latest: Release{Tag: tagV0190}}
+	tag, err := Resolve(context.Background(), src, ChannelRC, DefaultChannels)
+	if err != nil || tag != tagV0200RC101 {
+		t.Fatalf("got %q, %v", tag, err)
+	}
+	if src.latestCalls != 1 {
+		t.Fatalf("latestCalls = %d, want 1", src.latestCalls)
+	}
+}
+
+func TestResolve_OverflowPageStableNewerViaLatest(t *testing.T) {
+	src := &fakeSource{list: manyRCReleases(), latest: Release{Tag: tagV0210}}
+	tag, err := Resolve(context.Background(), src, ChannelRC, DefaultChannels)
+	if err != nil || tag != tagV0210 {
+		t.Fatalf("got %q, %v", tag, err)
+	}
+	if src.latestCalls != 1 {
+		t.Fatalf("latestCalls = %d, want 1", src.latestCalls)
+	}
+}
+
+func TestResolve_OverflowPageLatestErrors(t *testing.T) {
+	boom := errors.New("boom")
+	src := &fakeSource{list: manyRCReleases(), latestErr: boom}
+	if _, err := Resolve(context.Background(), src, ChannelRC, DefaultChannels); !errors.Is(err, boom) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestResolve_OverflowPageIgnoresPrereleaseLatest(t *testing.T) {
+	src := &fakeSource{
+		list:   manyRCReleases(),
+		latest: Release{Tag: "v0.21.0-rc.1", Prerelease: true},
+	}
+	tag, err := Resolve(context.Background(), src, ChannelRC, DefaultChannels)
+	if err != nil || tag != tagV0200RC101 {
+		t.Fatalf("got %q, %v", tag, err)
+	}
+	if src.latestCalls != 1 {
+		t.Fatalf("latestCalls = %d, want 1", src.latestCalls)
 	}
 }
