@@ -23,9 +23,11 @@ jobs:
       # A pull request opened with GITHUB_TOKEN does not start pull_request
       # workflow runs. workflow_dispatch is exempt, so run CI on the release
       # branch explicitly. The branch name travels through env, not the script.
+      # This job has no checkout, so gh cannot infer the repository from git
+      # and needs it named.
       - name: Run CI on the release PR
         if: steps.release.outputs.prs_created == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BRANCH: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
-        run: gh workflow run ci.yml --ref "$BRANCH"
+        run: gh workflow run ci.yml -R "$GITHUB_REPOSITORY" --ref "$BRANCH"
