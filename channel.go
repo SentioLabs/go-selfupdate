@@ -5,6 +5,8 @@
 package selfupdate
 
 import (
+	"context"
+	"fmt"
 	"regexp"
 
 	"golang.org/x/mod/semver"
@@ -55,8 +57,65 @@ func LookupChannel(specs []ChannelSpec, channel Channel) (ChannelSpec, bool) {
 	return ChannelSpec{}, false
 }
 
-// isValidSemver reports whether tag parses as semver with a leading v.
-// It exists so channel.go references semver now; Resolve uses it later.
-//
-//nolint:unused // referenced by Resolve in a later task
-func isValidSemver(tag string) bool { return semver.IsValid(tag) }
+// Resolve returns the tag a user on channel should be offered. An empty
+// channel means stable, which uses the forge's latest release. A patterned
+// channel returns its newest matching tag unless the newest stable release
+// is newer, in which case the stable tag is returned. A patterned channel
+// with no match falls back to the newest stable release. An unknown channel
+// is an error, as is a channel with no release at all.
+func Resolve(ctx context.Context, src Source, channel Channel, specs []ChannelSpec) (string, error) {
+	if specs == nil {
+		specs = DefaultChannels
+	}
+	if channel == "" {
+		channel = ChannelStable
+	}
+	spec, ok := LookupChannel(specs, channel)
+	if !ok {
+		return "", fmt.Errorf("unknown channel %q", channel)
+	}
+	if spec.Pattern == nil {
+		rel, err := src.Latest(ctx)
+		if err != nil {
+			return "", err
+		}
+		return rel.Tag, nil
+	}
+
+	releases, err := src.List(ctx, maxPerPage)
+	if err != nil {
+		return "", err
+	}
+
+	channelTag, stableTag := newestMatch(releases, spec.Pattern)
+	switch {
+	case channelTag != "" && stableTag != "":
+		if semver.Compare(stableTag, channelTag) > 0 {
+			return stableTag, nil
+		}
+		return channelTag, nil
+	case channelTag != "":
+		return channelTag, nil
+	case stableTag != "":
+		return stableTag, nil
+	default:
+		return "", fmt.Errorf("no %s release found", channel)
+	}
+}
+
+// newestMatch scans releases, which List returns newest first, and returns
+// the first tag matching pattern and the first non-prerelease tag.
+func newestMatch(releases []Release, pattern *regexp.Regexp) (channelTag, stableTag string) {
+	for _, r := range releases {
+		if channelTag == "" && pattern.MatchString(r.Tag) {
+			channelTag = r.Tag
+		}
+		if stableTag == "" && !r.Prerelease {
+			stableTag = r.Tag
+		}
+		if channelTag != "" && stableTag != "" {
+			break
+		}
+	}
+	return channelTag, stableTag
+}
