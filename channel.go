@@ -62,7 +62,8 @@ func LookupChannel(specs []ChannelSpec, channel Channel) (ChannelSpec, bool) {
 // channel returns its newest matching tag unless the newest stable release
 // is newer, in which case the stable tag is returned. A patterned channel
 // with no match falls back to the newest stable release. An unknown channel
-// is an error, as is a channel with no release at all.
+// is an error, as is a channel with no release at all. When the listed page
+// holds no stable release, Resolve asks Latest for one.
 func Resolve(ctx context.Context, src Source, channel Channel, specs []ChannelSpec) (string, error) {
 	if specs == nil {
 		specs = DefaultChannels
@@ -88,6 +89,15 @@ func Resolve(ctx context.Context, src Source, channel Channel, specs []ChannelSp
 	}
 
 	channelTag, stableTag := newestMatch(releases, spec.Pattern)
+	if channelTag != "" && stableTag == "" {
+		rel, err := src.Latest(ctx)
+		if err != nil {
+			return "", err
+		}
+		if rel.Tag != "" && !rel.Prerelease {
+			stableTag = rel.Tag
+		}
+	}
 	switch {
 	case channelTag != "" && stableTag != "":
 		if semver.Compare(stableTag, channelTag) > 0 {
