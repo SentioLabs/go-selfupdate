@@ -1,13 +1,17 @@
 package selfupdate
 
 import (
+	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"os"
+	"strings"
 )
 
-// ErrNotImplemented marks a stub that a later task replaces.
-var ErrNotImplemented = errors.New("selfupdate: not implemented")
+// ErrNoInstaller is returned by Update when Installer is nil.
+var ErrNoInstaller = errors.New("selfupdate: no installer configured")
 
 // Updater ties a CLI's identity to a Source, Store and Installer.
 type Updater struct {
@@ -39,16 +43,162 @@ type CheckResult struct {
 	Cmp     int // Compare(Current, Latest): 0 same, >0 update available, <0 current is newer
 }
 
-// CurrentChannel returns the persisted channel, or stable when none is set.
-func (u *Updater) CurrentChannel() (Channel, error) { return "", ErrNotImplemented }
+func (u *Updater) channels() []ChannelSpec {
+	if u.Channels == nil {
+		return DefaultChannels
+	}
+	return u.Channels
+}
+
+func (u *Updater) out() io.Writer {
+	if u.Out == nil {
+		return os.Stdout
+	}
+	return u.Out
+}
+
+func (u *Updater) errOut() io.Writer {
+	if u.ErrOut == nil {
+		return os.Stderr
+	}
+	return u.ErrOut
+}
+
+func (u *Updater) in() io.Reader {
+	if u.In == nil {
+		return os.Stdin
+	}
+	return u.In
+}
+
+// CurrentChannel returns the persisted channel, or stable when no Store is
+// configured or the stored value is empty.
+func (u *Updater) CurrentChannel() (Channel, error) {
+	if u.Store == nil {
+		return ChannelStable, nil
+	}
+	ch, err := u.Store.Channel()
+	if err != nil {
+		return "", fmt.Errorf("read update channel: %w", err)
+	}
+	if ch == "" {
+		return ChannelStable, nil
+	}
+	return ch, nil
+}
 
 // Check resolves the latest release for the current channel without installing.
 func (u *Updater) Check(ctx context.Context) (CheckResult, error) {
-	return CheckResult{}, ErrNotImplemented
+	ch, err := u.CurrentChannel()
+	if err != nil {
+		return CheckResult{}, err
+	}
+	latest, err := Resolve(ctx, u.Source, ch, u.channels())
+	if err != nil {
+		return CheckResult{}, err
+	}
+	return CheckResult{
+		Current: NormalizeVersion(u.Version),
+		Latest:  latest,
+		Channel: ch,
+		Cmp:     Compare(u.Version, latest),
+	}, nil
 }
 
-// Update checks and, unless opts.Check, installs after confirmation.
-func (u *Updater) Update(ctx context.Context, opts UpdateOptions) error { return ErrNotImplemented }
+// Update checks for a newer release on the current channel and, unless
+// opts.Check, installs it after confirmation. PreInstall runs between the
+// confirmation and the install.
+//
+//nolint:revive // CLI output writes always succeed
+func (u *Updater) Update(ctx context.Context, opts UpdateOptions) error {
+	res, err := u.Check(ctx)
+	if err != nil {
+		return fmt.Errorf("check for updates: %w", err)
+	}
+	w := u.out()
 
-// SwitchChannel validates, warns, and persists a new channel.
-func (u *Updater) SwitchChannel(channel Channel, yes bool) error { return ErrNotImplemented }
+	if opts.Check {
+		switch {
+		case res.Cmp == 0:
+			fmt.Fprintf(w, "%s %s (%s) is up to date\n", u.Name, res.Current, res.Channel)
+		case res.Cmp > 0:
+			fmt.Fprintf(w, "Update available: %s -> %s (%s channel)\n", res.Current, res.Latest, res.Channel)
+			fmt.Fprintf(w, "Run '%s self update' to upgrade\n", u.Name)
+		default:
+			fmt.Fprintf(w, "%s %s is newer than the latest %s release %s\n", u.Name, res.Current, res.Channel, res.Latest)
+		}
+		return nil
+	}
+
+	if res.Cmp == 0 && !opts.Force {
+		fmt.Fprintf(w, "%s %s (%s) is up to date\n", u.Name, res.Current, res.Channel)
+		return nil
+	}
+	if res.Cmp < 0 && !opts.Force {
+		fmt.Fprintf(w, "%s %s is newer than the latest %s release %s\n", u.Name, res.Current, res.Channel, res.Latest)
+		return nil
+	}
+
+	fmt.Fprintf(w, "Updating %s %s -> %s...\n", u.Name, res.Current, res.Latest)
+	if !opts.Yes && !u.confirm("Continue? [y/N] ") {
+		fmt.Fprintln(w, "Update cancelled.")
+		return nil
+	}
+	if u.PreInstall != nil {
+		if err := u.PreInstall(ctx, res.Current, res.Latest); err != nil {
+			return fmt.Errorf("pre-install step failed: %w", err)
+		}
+	}
+	if u.Installer == nil {
+		return ErrNoInstaller
+	}
+	return u.Installer.Install(ctx, res.Latest)
+}
+
+// SwitchChannel validates channel against the configured specs, shows the
+// channel's warning and asks for confirmation unless yes, then persists it.
+//
+//nolint:revive // CLI output writes always succeed
+func (u *Updater) SwitchChannel(channel Channel, yes bool) error {
+	specs := u.channels()
+	spec, ok := LookupChannel(specs, channel)
+	if !ok {
+		names := make([]string, 0, len(specs))
+		for _, s := range specs {
+			names = append(names, string(s.Name))
+		}
+		return fmt.Errorf("invalid channel %q: must be one of %s", channel, strings.Join(names, ", "))
+	}
+	if u.Store == nil {
+		return ErrNoStore
+	}
+	if spec.Warning != "" && !yes {
+		fmt.Fprintf(u.errOut(), "\n%s\n\n", spec.Warning)
+		if !u.confirm(fmt.Sprintf("Switch to %s channel? [y/N] ", channel)) {
+			fmt.Fprintln(u.out(), "Cancelled.")
+			return nil
+		}
+	}
+	if err := u.Store.SetChannel(channel); err != nil {
+		return fmt.Errorf("save update channel: %w", err)
+	}
+	fmt.Fprintf(u.out(), "Switched to %s channel\n", channel)
+	if channel != ChannelStable {
+		fmt.Fprintf(u.out(), "Run '%s self update' to get the latest %s build\n", u.Name, channel)
+	}
+	return nil
+}
+
+// confirm prints prompt to Out and reads one line from In. Only "y" or "Y"
+// accepts. Read errors (for example a closed stdin) count as a decline.
+//
+//nolint:revive // CLI output writes always succeed
+func (u *Updater) confirm(prompt string) bool {
+	fmt.Fprint(u.out(), prompt)
+	line, err := bufio.NewReader(u.in()).ReadString('\n')
+	if err != nil && line == "" {
+		return false
+	}
+	answer := strings.TrimSpace(line)
+	return answer == "y" || answer == "Y"
+}
